@@ -1,0 +1,79 @@
+You are tasked to build a web-based arcade management platform with Supabase as the database and backend-as-a-service. The system should have both User-facing features and an Admin Dashboard, with a fun arcade-style UI/UX.
+
+🔑 Core Requirements
+Database & Backend Tech
+* Use Supabase for:
+    * Auth: user signup/login, password reset, role-based access (user vs admin).
+    * Postgres Database: to store users, transactions, promotions, and top-ups.
+    * Row-Level Security (RLS): ensure users only see their own data, admins see everything.
+    * Realtime: live updates on balances, leaderboards, sales dashboards.
+    * Edge Functions: business logic (auto-apply points when coins purchased, validate promotions, admin top-ups).
+    * Storage (optional): host user avatars, arcade images, and promo banners.
+
+👥 User Roles
+Regular User
+* Sign up / log in with Supabase Auth.
+* Buy coins (earn points for each purchase).
+* Redeem promotions (discounts, bonus points, free coins).
+* Track balances, purchase history, and redeemed promos.
+* View arcade leaderboard & achievements (optional gamification).
+Admin
+* Manage users (view, search, reset balances, assign roles).
+* Manage promotions (create, edit, schedule, expire promos).
+* Track sales and generate reports.
+* Monitor activity with realtime stats.
+* Perform Top-Ups (manually add coins/points to user accounts).
+
+🖥️ UI / UX Design & Flow
+Landing Page
+* Neon arcade hero banner with glowing CTA buttons: Sign Up / Log In.
+* Carousel showcasing active promotions.
+* Tagline: “Earn points with every coin you play.”
+Authentication
+* Signup/login via Supabase Auth (email/password, optional social login).
+* Arcade-inspired glowing buttons and inputs.
+User Dashboard
+* Header: avatar, username, coin balance, point balance.
+* Tabs:
+    1. Buy Coins → purchase coins (updates balances, logged in Supabase).
+    2. Promotions → claim active promos (updates balances + promo history).
+    3. History → view past transactions (top-ups + promo redemptions).
+    4. Leaderboard (optional) → top users ranked by points.
+Admin Dashboard
+* Sidebar Navigation: Dashboard | Users | Promotions | Sales Reports | Top-Up.
+* Main Panels:
+    * Dashboard Overview: cards + charts for total users, sales, active promos.
+    * Users Management: search, reset balances, assign roles.
+    * Promotions Management: CRUD promotions with start/end dates.
+    * Sales Reports: view transactions, filter by date, export reports.
+    * Top-Up Page:
+        * Form to select a user.
+        * Input fields for coins and/or bonus points.
+        * Submit → updates Supabase balances + logs entry in a top-up history.
+        * Show a table of recent admin top-ups for transparency.
+
+🎨 UI/UX Design Principles
+* Theme: Neon arcade meets modern dashboard.
+* Colors: Dark background + neon accents (cyan, magenta, green).
+* Typography: Pixel/arcade font for headings; modern sans-serif (Poppins/Inter) for body text.
+* Components: Promo cards, glowing buttons, charts for reports, progress bars for purchases.
+* Animations: Coin spin when balance updates, glow hover effects, flickering neon text.
+* Accessibility: High contrast, responsive for mobile, keyboard-friendly navigation.
+
+⚡ UX Enhancements
+* Gamification: badges, streak bonuses, leaderboards.
+* Mobile-first Design: fully responsive across devices.
+* Notifications: email or push (Supabase + 3rd party) for promo reminders.
+* Personalization: dynamic promos (e.g., “Hey Mark, top up today and get +20 bonus points!”).
+
+🚀 Development Flow
+1. Set up Supabase project (Auth, Postgres, Storage, Edge Functions).
+2. Define roles (user, admin) with Supabase Auth.
+3. Implement authentication flows (signup/login/logout).
+4. Build User Dashboard (balances, purchases, promotions, history).
+5. Integrate payment gateway (transactions logged in Supabase).
+6. Build Admin Dashboard (sales, reports, promotions).
+7. Add Admin Top-Up feature (form + logs in history).
+8. Style with arcade-inspired UI/UX (colors, animations, fonts).
+9. Secure with RLS (users can only see their own data).
+10. Test & Deploy.
