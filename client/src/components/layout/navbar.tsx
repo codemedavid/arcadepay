@@ -20,6 +20,8 @@ export function Navbar() {
   const { data: authData } = useQuery<{ user: User } | null>({
     queryKey: ["/api/auth/me"],
     retry: false,
+    staleTime: 0, // Always refetch auth state
+    refetchOnWindowFocus: true,
   });
 
   const user = authData?.user;

@@ -1,21 +1,16 @@
 import type { Express } from "express";
 import { createServer, type Server } from "http";
-import Stripe from "stripe";
 import bcrypt from "bcrypt";
 import session from "express-session";
+import pgSession from "connect-pg-simple";
 import passport from "passport";
 import { Strategy as LocalStrategy } from "passport-local";
 import { storage } from "./storage";
-import { insertUserSchema, insertPromotionSchema } from "@shared/schema";
+import { insertUserSchema, insertPromotionSchema, insertRewardSchema } from "@shared/schema";
 import { z } from "zod";
 
-if (!process.env.STRIPE_SECRET_KEY) {
-  throw new Error('Missing required Stripe secret: STRIPE_SECRET_KEY');
-}
+const PgSession = pgSession(session);
 
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY, {
-  apiVersion: "2025-08-27.basil",
-});
 
 // Passport configuration
 passport.use(new LocalStrategy(
@@ -53,8 +48,14 @@ passport.deserializeUser(async (id: string, done) => {
 });
 
 export async function registerRoutes(app: Express): Promise<Server> {
-  // Session configuration
+  // Session configuration with PostgreSQL store
   app.use(session({
+    store: new PgSession({
+      conString: process.env.DATABASE_URL,
+      ssl: { rejectUnauthorized: false },
+      tableName: 'user_sessions',
+      createTableIfMissing: true,
+    }),
     secret: process.env.SESSION_SECRET || 'fallback-secret',
     resave: false,
     saveUninitialized: false,
@@ -66,6 +67,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   // Auth middleware
   const requireAuth = (req: any, res: any, next: any) => {
+    console.log('Auth check:', {
+      isAuthenticated: req.isAuthenticated(),
+      sessionID: req.sessionID,
+      user: req.user ? { id: req.user.id, email: req.user.email } : null,
+      cookies: req.headers.cookie
+    });
+    
     if (req.isAuthenticated()) {
       return next();
     }
@@ -111,8 +119,21 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  app.post('/api/auth/login', passport.authenticate('local'), (req, res) => {
-    res.json({ user: { ...req.user, password: undefined } });
+  app.post('/api/auth/login', (req, res, next) => {
+    passport.authenticate('local', (err, user, info) => {
+      if (err) {
+        return res.status(500).json({ message: 'Authentication error' });
+      }
+      if (!user) {
+        return res.status(401).json({ message: info?.message || 'Invalid email or password' });
+      }
+      req.login(user, (loginErr) => {
+        if (loginErr) {
+          return res.status(500).json({ message: 'Login failed' });
+        }
+        res.json({ user: { ...user, password: undefined } });
+      });
+    })(req, res, next);
   });
 
   app.post('/api/auth/logout', (req, res) => {
@@ -125,6 +146,17 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   app.get('/api/auth/me', (req, res) => {
+    console.log('Auth me check:', {
+      isAuthenticated: req.isAuthenticated(),
+      sessionID: req.sessionID,
+      user: req.user ? { id: req.user.id, email: req.user.email } : null,
+      session: req.session ? { 
+        cookie: req.session.cookie,
+        passport: req.session.passport 
+      } : null,
+      cookies: req.headers.cookie
+    });
+    
     if (req.isAuthenticated()) {
       res.json({ user: { ...req.user, password: undefined } });
     } else {
@@ -236,86 +268,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Payment routes
-  app.post('/api/create-payment-intent', requireAuth, async (req, res) => {
-    try {
-      const { packageType } = req.body;
-      
-      // Define coin packages
-      const packages = {
-        starter: { coins: 500, points: 50, price: 5.00 },
-        gamer: { coins: 1200, points: 150, price: 10.00 },
-        pro: { coins: 2500, points: 400, price: 20.00 },
-        elite: { coins: 5500, points: 1000, price: 40.00 },
-      };
-      
-      const pkg = packages[packageType as keyof typeof packages];
-      if (!pkg) {
-        return res.status(400).json({ message: 'Invalid package type' });
-      }
-      
-      const paymentIntent = await stripe.paymentIntents.create({
-        amount: Math.round(pkg.price * 100), // Convert to cents
-        currency: 'usd',
-        metadata: {
-          userId: (req.user as any).id,
-          packageType,
-          coins: pkg.coins.toString(),
-          points: pkg.points.toString(),
-        },
-      });
-      
-      res.json({ clientSecret: paymentIntent.client_secret });
-    } catch (error: any) {
-      res.status(500).json({ message: 'Error creating payment intent: ' + error.message });
-    }
-  });
-
-  app.post('/api/payment/confirm', requireAuth, async (req, res) => {
-    try {
-      const { paymentIntentId } = req.body;
-      
-      const paymentIntent = await stripe.paymentIntents.retrieve(paymentIntentId);
-      
-      if (paymentIntent.status === 'succeeded') {
-        const { userId, packageType, coins, points } = paymentIntent.metadata;
-        
-        if (userId !== (req.user as any).id) {
-          return res.status(400).json({ message: 'Payment intent user mismatch' });
-        }
-        
-        const coinsToAdd = parseInt(coins);
-        const pointsToEarn = parseInt(points);
-        
-        // Update user balance
-        const updatedUser = await storage.updateUserBalance(userId, coinsToAdd, pointsToEarn);
-        
-        // Log transaction
-        await storage.createTransaction({
-          userId,
-          type: 'purchase',
-          amount: (paymentIntent.amount / 100).toString(),
-          coinsAdded: coinsToAdd,
-          pointsEarned: pointsToEarn,
-          description: `Purchased ${packageType} package`,
-          stripePaymentIntentId: paymentIntentId,
-          status: 'completed',
-        });
-        
-        res.json({
-          message: 'Payment confirmed successfully',
-          newBalance: {
-            coinBalance: updatedUser.coinBalance,
-            pointBalance: updatedUser.pointBalance,
-          }
-        });
-      } else {
-        res.status(400).json({ message: 'Payment not completed' });
-      }
-    } catch (error: any) {
-      res.status(500).json({ message: error.message });
-    }
-  });
 
   // Admin routes
   app.get('/api/admin/users', requireAdmin, async (req, res) => {
@@ -346,7 +298,25 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.get('/api/admin/transactions', requireAdmin, async (req, res) => {
     try {
-      const transactions = await storage.getAllTransactions();
+      const { startDate, endDate, type, status, userId } = req.query as Record<string, string | undefined>;
+      const hasAnyFilter = startDate || endDate || type || status || userId;
+
+      if (!hasAnyFilter) {
+        const transactions = await storage.getAllTransactions();
+        return res.json(transactions);
+      }
+
+      const parsedStart = startDate ? new Date(startDate) : undefined;
+      const parsedEnd = endDate ? new Date(endDate) : undefined;
+
+      const transactions = await storage.getTransactionsFiltered({
+        startDate: parsedStart,
+        endDate: parsedEnd,
+        type: type || undefined,
+        status: status || undefined,
+        userId: userId || undefined,
+      });
+
       res.json(transactions);
     } catch (error: any) {
       res.status(500).json({ message: error.message });
@@ -421,26 +391,30 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
   app.post('/api/admin/topup', requireAdmin, async (req, res) => {
     try {
-      const { userId, coins, points, reason } = req.body;
+      const { userId, coins, amount, reason } = req.body;
       
-      // Validate input
-      const coinsToAdd = parseInt(coins) || 0;
-      const pointsToAdd = parseInt(points) || 0;
+      // Validate and normalize input
+      const coinsToAdd = Number.isFinite(Number(coins)) ? parseInt(coins) : 0;
+      const amountPesos = Number.isFinite(Number(amount)) ? parseFloat(amount) : 0;
       
-      if (coinsToAdd <= 0 && pointsToAdd <= 0) {
-        return res.status(400).json({ message: 'Must specify coins or points to add' });
+      if ((coinsToAdd || 0) <= 0 && (amountPesos || 0) <= 0) {
+        return res.status(400).json({ message: 'Must specify amount and/or coins to add' });
       }
       
-      // Update user balance
-      const updatedUser = await storage.updateUserBalance(userId, coinsToAdd, pointsToAdd);
+      // Compute points: 1 point per ₱50 spent
+      const pointsToAdd = Math.floor((amountPesos || 0) / 50);
       
-      // Log transaction
+      // Update user balance
+      const updatedUser = await storage.updateUserBalance(userId, coinsToAdd || 0, pointsToAdd);
+      
+      // Log transaction as a cashier purchase
       await storage.createTransaction({
         userId,
-        type: 'admin_topup',
-        coinsAdded: coinsToAdd,
+        type: 'purchase',
+        amount: amountPesos ? amountPesos.toFixed(2) : undefined,
+        coinsAdded: coinsToAdd || 0,
         pointsEarned: pointsToAdd,
-        description: `Admin top-up: ${reason || 'No reason provided'}`,
+        description: `Cashier purchase: ₱${(amountPesos || 0).toFixed(2)} for ${coinsToAdd || 0} coins${reason ? ` — ${reason}` : ''}`,
         status: 'completed',
       });
       
@@ -449,12 +423,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
         adminId: (req.user as any).id,
         targetUserId: userId,
         action: 'topup',
-        description: `Added ${coinsToAdd} coins and ${pointsToAdd} points to user account`,
-        metadata: { coins: coinsToAdd, points: pointsToAdd, reason },
+        description: `Processed cashier purchase of ₱${(amountPesos || 0).toFixed(2)} awarding ${pointsToAdd} points and ${coinsToAdd || 0} coins`,
+        metadata: { coins: coinsToAdd || 0, amount: amountPesos || 0, computedPoints: pointsToAdd, reason },
       });
       
       res.json({
-        message: 'Top-up completed successfully',
+        message: 'Top-up recorded as purchase and points awarded',
+        computedPoints: pointsToAdd,
         newBalance: {
           coinBalance: updatedUser.coinBalance,
           pointBalance: updatedUser.pointBalance,
@@ -462,6 +437,230 @@ export async function registerRoutes(app: Express): Promise<Server> {
       });
     } catch (error: any) {
       res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Reward routes
+  app.get('/api/rewards', async (req, res) => {
+    try {
+      const rewards = await storage.getActiveRewards();
+      res.json(rewards);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get('/api/rewards/:id', async (req, res) => {
+    try {
+      const reward = await storage.getRewardById(req.params.id);
+      if (!reward) {
+        return res.status(404).json({ message: 'Reward not found' });
+      }
+      res.json(reward);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post('/api/rewards/redeem/:id', requireAuth, async (req, res) => {
+    try {
+      const reward = await storage.getRewardById(req.params.id);
+      if (!reward) {
+        return res.status(404).json({ message: 'Reward not found' });
+      }
+      
+      if (!reward.isActive || reward.stock <= 0) {
+        return res.status(400).json({ message: 'Reward not available' });
+      }
+
+      const redemption = await storage.redeemReward({
+        userId: (req.user as any).id,
+        rewardId: req.params.id,
+        pointsSpent: reward.pointsRequired,
+        status: 'pending',
+        redemptionCode: `RWD-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+      });
+
+      res.json(redemption);
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.get('/api/user/rewards/redemptions', requireAuth, async (req, res) => {
+    try {
+      const redemptions = await storage.getUserRewardRedemptions((req.user as any).id);
+      res.json(redemptions);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Admin reward routes
+  app.get('/api/admin/rewards', requireAdmin, async (req, res) => {
+    try {
+      const rewards = await storage.getAllRewards();
+      res.json(rewards);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.post('/api/admin/rewards', requireAdmin, async (req, res) => {
+    try {
+      const validatedData = insertRewardSchema.parse(req.body);
+      const reward = await storage.createReward(validatedData);
+      
+      // Log admin action
+      await storage.logAdminAction({
+        adminId: (req.user as any).id,
+        action: 'create_reward',
+        description: `Created reward: ${reward.title}`,
+        metadata: { rewardId: reward.id },
+      });
+
+      res.json(reward);
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.put('/api/admin/rewards/:id', requireAdmin, async (req, res) => {
+    try {
+      const reward = await storage.updateReward(req.params.id, req.body);
+      
+      // Log admin action
+      await storage.logAdminAction({
+        adminId: (req.user as any).id,
+        action: 'update_reward',
+        description: `Updated reward: ${reward.title}`,
+        metadata: { rewardId: reward.id },
+      });
+
+      res.json(reward);
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
+    }
+  });
+
+  app.delete('/api/admin/rewards/:id', requireAdmin, async (req, res) => {
+    try {
+      const reward = await storage.getRewardById(req.params.id);
+      if (!reward) {
+        return res.status(404).json({ message: 'Reward not found' });
+      }
+
+      await storage.deleteReward(req.params.id);
+      
+      // Log admin action
+      await storage.logAdminAction({
+        adminId: (req.user as any).id,
+        action: 'delete_reward',
+        description: `Deleted reward: ${reward.title}`,
+        metadata: { rewardId: reward.id },
+      });
+
+      res.json({ message: 'Reward deleted successfully' });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.get('/api/admin/rewards/redemptions', requireAdmin, async (req, res) => {
+    try {
+      const redemptions = await storage.getAllRewardRedemptions();
+      res.json(redemptions);
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  app.put('/api/admin/rewards/redemptions/:id/status', requireAdmin, async (req, res) => {
+    try {
+      const { status, notes } = req.body;
+      await storage.updateRewardRedemptionStatus(req.params.id, status, notes);
+      
+      // Log admin action
+      await storage.logAdminAction({
+        adminId: (req.user as any).id,
+        action: 'update_reward_redemption',
+        description: `Updated reward redemption status to: ${status}`,
+        metadata: { redemptionId: req.params.id, status, notes },
+      });
+
+      res.json({ message: 'Redemption status updated successfully' });
+    } catch (error: any) {
+      res.status(500).json({ message: error.message });
+    }
+  });
+
+  // Admin claim reward for user
+  app.post('/api/admin/rewards/claim', requireAdmin, async (req, res) => {
+    try {
+      const { userId, rewardId } = req.body;
+      
+      if (!userId || !rewardId) {
+        return res.status(400).json({ message: 'User ID and Reward ID are required' });
+      }
+
+      // Get reward details
+      const reward = await storage.getRewardById(rewardId);
+      if (!reward) {
+        return res.status(404).json({ message: 'Reward not found' });
+      }
+      
+      if (!reward.isActive || reward.stock <= 0) {
+        return res.status(400).json({ message: 'Reward not available' });
+      }
+
+      // Get user details
+      const user = await storage.getUser(userId);
+      if (!user) {
+        return res.status(404).json({ message: 'User not found' });
+      }
+
+      if (user.pointBalance < reward.pointsRequired) {
+        return res.status(400).json({ message: 'User has insufficient points' });
+      }
+
+      // Claim the reward
+      const redemption = await storage.redeemReward({
+        userId: userId,
+        rewardId: rewardId,
+        pointsSpent: reward.pointsRequired,
+        status: 'completed', // Admin claims are automatically completed
+        redemptionCode: `ADMIN-${Date.now()}-${Math.random().toString(36).substr(2, 9).toUpperCase()}`,
+      });
+
+      // Log admin action
+      await storage.logAdminAction({
+        adminId: (req.user as any).id,
+        targetUserId: userId,
+        action: 'admin_reward_claim',
+        description: `Claimed reward "${reward.title}" for user ${user.username} (${user.email})`,
+        metadata: { 
+          rewardId: reward.id, 
+          rewardTitle: reward.title,
+          pointsSpent: reward.pointsRequired,
+          redemptionId: redemption.id,
+          redemptionCode: redemption.redemptionCode
+        },
+      });
+
+      res.json({
+        message: 'Reward claimed successfully for user',
+        redemption: {
+          ...redemption,
+          reward,
+          user: {
+            id: user.id,
+            username: user.username,
+            email: user.email,
+          }
+        }
+      });
+    } catch (error: any) {
+      res.status(400).json({ message: error.message });
     }
   });
 

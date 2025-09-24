@@ -1,5 +1,4 @@
-import { useState } from "react";
-import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
@@ -7,16 +6,14 @@ import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
-import { NeonButton } from "@/components/neon-button";
 import { useLocation } from "wouter";
 import { 
-  ShoppingCart, 
   Gift, 
   History, 
   Trophy, 
   Coins, 
   Star,
-  CreditCard
+  Award
 } from "lucide-react";
 
 interface Transaction {
@@ -48,21 +45,30 @@ interface User {
   level: number;
 }
 
-const coinPackages = [
-  { id: "starter", name: "Starter Pack", coins: 500, points: 50, price: 5.00, emoji: "🎮", description: "Perfect for new players" },
-  { id: "gamer", name: "Gamer Pack", coins: 1200, points: 150, price: 10.00, emoji: "🚀", description: "Best value for money", popular: true },
-  { id: "pro", name: "Pro Pack", coins: 2500, points: 400, price: 20.00, emoji: "⭐", description: "For serious gamers" },
-  { id: "elite", name: "Elite Pack", coins: 5500, points: 1000, price: 40.00, emoji: "👑", description: "Ultimate gaming experience" },
-];
+interface Reward {
+  id: string;
+  title: string;
+  description: string;
+  imageUrl?: string;
+  pointsRequired: number;
+  stock: number;
+  isActive: boolean;
+  category: string;
+  emoji?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 
 export default function UserDashboard() {
   const [, setLocation] = useLocation();
-  const [selectedPackage, setSelectedPackage] = useState(coinPackages[1]);
   const { toast } = useToast();
   const queryClient = useQueryClient();
 
   const { data: user } = useQuery<{ user: User }>({
     queryKey: ["/api/auth/me"],
+    staleTime: 0, // Always refetch auth state
+    refetchOnWindowFocus: true,
   });
 
   const { data: transactions = [], isLoading: transactionsLoading } = useQuery<Transaction[]>({
@@ -71,6 +77,10 @@ export default function UserDashboard() {
 
   const { data: promotions = [], isLoading: promotionsLoading } = useQuery<Promotion[]>({
     queryKey: ["/api/promotions"],
+  });
+
+  const { data: rewards = [], isLoading: rewardsLoading } = useQuery<Reward[]>({
+    queryKey: ["/api/rewards"],
   });
 
   const { data: userBalance } = useQuery({
@@ -104,9 +114,31 @@ export default function UserDashboard() {
     },
   });
 
-  const handlePurchase = () => {
-    setLocation(`/checkout?package=${selectedPackage.id}`);
-  };
+  const redeemRewardMutation = useMutation({
+    mutationFn: async (rewardId: string) => {
+      return await apiRequest("POST", `/api/rewards/redeem/${rewardId}`, {});
+    },
+    onSuccess: async (response) => {
+      const data = await response.json();
+      toast({
+        title: "Reward Redeemed!",
+        description: `You successfully redeemed your reward! Redemption code: ${data.redemptionCode}`,
+      });
+      
+      // Refresh relevant queries
+      queryClient.invalidateQueries({ queryKey: ["/api/user/balance"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/user/transactions"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/rewards"] });
+    },
+    onError: async (error: any) => {
+      const errorData = await error.response?.json?.() || { message: "Failed to redeem reward" };
+      toast({
+        title: "Error",
+        description: errorData.message,
+        variant: "destructive",
+      });
+    },
+  });
 
   if (!user) {
     return (
@@ -118,15 +150,52 @@ export default function UserDashboard() {
 
   return (
     <div className="container mx-auto p-4 space-y-8" data-testid="user-dashboard">
-      <Tabs defaultValue="buy-coins" className="w-full">
-        <TabsList className="grid w-full grid-cols-4 bg-card">
-          <TabsTrigger value="buy-coins" className="data-[state=active]:neon-border-cyan" data-testid="tab-buy-coins">
-            <ShoppingCart className="mr-2 h-4 w-4" />
-            Buy Coins
-          </TabsTrigger>
+      {/* Points Display */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-6 mb-8">
+        <Card className="card-glow">
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold mb-2">Your Points</h3>
+                <div className="flex items-center space-x-2">
+                  <Star className="w-6 h-6 text-neon-cyan" />
+                  <span className="text-3xl font-bold text-neon-cyan">
+                    {(userBalance as any)?.pointBalance?.toLocaleString() || user?.user?.pointBalance?.toLocaleString() || 0}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground mt-2">
+                  Earn more points by playing games and claiming promotions!
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+        
+        <Card className="card-glow">
+          <CardContent className="p-6">
+            <div className="flex items-center justify-between">
+              <div>
+                <h3 className="text-lg font-semibold mb-2">Your Coins</h3>
+                <div className="flex items-center space-x-2">
+                  <Coins className="w-6 h-6 text-yellow-400" />
+                  <span className="text-3xl font-bold text-yellow-400">
+                    {(userBalance as any)?.coinBalance?.toLocaleString() || user?.user?.coinBalance?.toLocaleString() || 0}
+                  </span>
+                </div>
+                <p className="text-sm text-muted-foreground mt-2">
+                  Use coins to play arcade games and unlock rewards!
+                </p>
+              </div>
+            </div>
+          </CardContent>
+        </Card>
+      </div>
+
+      <Tabs defaultValue="promotions" className="w-full">
+        <TabsList className="grid w-full grid-cols-3 bg-card">
           <TabsTrigger value="promotions" className="data-[state=active]:neon-border-cyan" data-testid="tab-promotions">
             <Gift className="mr-2 h-4 w-4" />
-            Promotions
+            Rewards
           </TabsTrigger>
           <TabsTrigger value="history" className="data-[state=active]:neon-border-cyan" data-testid="tab-history">
             <History className="mr-2 h-4 w-4" />
@@ -138,139 +207,70 @@ export default function UserDashboard() {
           </TabsTrigger>
         </TabsList>
 
-        {/* Buy Coins Tab */}
-        <TabsContent value="buy-coins" className="space-y-6" data-testid="content-buy-coins">
-          <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-            {/* Coin Packages */}
-            <div className="lg:col-span-2 space-y-4">
-              <h3 className="font-arcade text-2xl mb-6 glow-green">Choose Your Package</h3>
-              
-              <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {coinPackages.map((pkg) => (
-                  <Card
-                    key={pkg.id}
-                    className={`cursor-pointer transition-all card-glow ${
-                      selectedPackage.id === pkg.id 
-                        ? "neon-border-cyan scale-105" 
-                        : "hover:border-neon-cyan/50"
-                    } ${pkg.popular ? "relative" : ""}`}
-                    onClick={() => setSelectedPackage(pkg)}
-                    data-testid={`package-${pkg.id}`}
-                  >
-                    {pkg.popular && (
-                      <div className="absolute -top-3 left-1/2 transform -translate-x-1/2">
-                        <Badge className="bg-neon-pink">POPULAR</Badge>
-                      </div>
-                    )}
-                    <CardContent className="p-6">
-                      <div className="flex items-center justify-between mb-4">
-                        <div>
-                          <h4 className="font-bold text-lg">{pkg.name}</h4>
-                          <p className="text-muted-foreground text-sm">{pkg.description}</p>
-                        </div>
-                        <div className="text-3xl">{pkg.emoji}</div>
-                      </div>
-                      <div className="mb-4">
-                        <div className="flex items-center space-x-2 mb-2">
-                          <Coins className="w-4 h-4 text-yellow-400" />
-                          <span className="text-xl font-bold">{pkg.coins.toLocaleString()} Coins</span>
-                        </div>
-                        <div className="flex items-center space-x-2">
-                          <Star className="w-4 h-4 text-neon-cyan" />
-                          <span className="text-neon-cyan">+{pkg.points} Bonus Points</span>
-                        </div>
-                      </div>
-                      <div className="text-xl font-semibold text-neon-pink">
-                        ${pkg.price.toFixed(2)}
-                      </div>
-                    </CardContent>
-                  </Card>
-                ))}
-              </div>
-            </div>
 
-            {/* Payment Panel */}
-            <Card className="card-glow">
-              <CardHeader>
-                <CardTitle>Payment Details</CardTitle>
-              </CardHeader>
-              <CardContent className="space-y-4">
-                <div className="bg-muted/20 rounded-lg p-4">
-                  <div className="flex items-center justify-between">
-                    <span>{selectedPackage.name}</span>
-                    <span className="font-semibold">${selectedPackage.price.toFixed(2)}</span>
-                  </div>
-                  <div className="text-sm text-muted-foreground mt-1">
-                    {selectedPackage.coins.toLocaleString()} Coins + {selectedPackage.points} Points
-                  </div>
-                </div>
-                
-                <NeonButton
-                  variant="cyan"
-                  className="w-full py-3"
-                  onClick={handlePurchase}
-                  data-testid="purchase-button"
-                >
-                  <CreditCard className="mr-2 h-4 w-4" />
-                  Purchase with Stripe
-                </NeonButton>
-                
-                <div className="text-xs text-muted-foreground text-center">
-                  Secure payment processing by Stripe
-                </div>
-              </CardContent>
-            </Card>
-          </div>
-        </TabsContent>
-
-        {/* Promotions Tab */}
+        {/* Rewards Tab */}
         <TabsContent value="promotions" className="space-y-6" data-testid="content-promotions">
-          <h3 className="font-arcade text-2xl mb-6 glow-green">Active Promotions</h3>
+          <h3 className="font-arcade text-2xl mb-6 glow-green">Available Rewards</h3>
           
-          {promotionsLoading ? (
+          {rewardsLoading ? (
             <div className="flex justify-center">
               <LoadingSpinner />
             </div>
-          ) : promotions.length > 0 ? (
+          ) : rewards.length > 0 ? (
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-              {promotions.map((promo) => (
-                <Card key={promo.id} className="promo-card" data-testid={`promotion-${promo.id}`}>
+              {rewards.map((reward) => (
+                <Card key={reward.id} className="promo-card" data-testid={`reward-${reward.id}`}>
                   <CardContent className="p-6">
                     <div className="flex items-start justify-between mb-4">
-                      <div>
-                        <h4 className="font-bold text-lg">{promo.title}</h4>
-                        <p className="text-sm text-muted-foreground">{promo.description}</p>
+                      <div className="flex-1">
+                        <h4 className="font-bold text-lg">{reward.title}</h4>
+                        <p className="text-sm text-muted-foreground mb-3">{reward.description}</p>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center space-x-2">
+                            <Star className="w-4 h-4 text-neon-cyan" />
+                            <span className="text-sm font-semibold text-neon-cyan">
+                              {reward.pointsRequired} points
+                            </span>
+                          </div>
+                          <Badge 
+                            variant={reward.stock > 0 ? "default" : "secondary"}
+                            className={reward.stock > 0 
+                              ? "bg-neon-green/20 text-neon-green" 
+                              : "bg-red-400/20 text-red-400"
+                            }
+                          >
+                            {reward.stock} left
+                          </Badge>
+                        </div>
                       </div>
-                      <span className="text-2xl">{promo.emoji}</span>
+                      <span className="text-2xl ml-2">{reward.emoji}</span>
                     </div>
-                    <div className="mb-4">
-                      <div className="text-sm text-muted-foreground">
-                        Expires: {new Date(promo.endDate).toLocaleDateString()}
-                      </div>
-                      <div className="text-sm font-bold text-neon-green">
-                        +{promo.value} {promo.type.includes('points') ? 'Points' : 'Coins'}
-                      </div>
-                    </div>
+                    
                     <Button
-                      onClick={() => redeemMutation.mutate(promo.id)}
-                      disabled={redeemMutation.isPending}
-                      className="w-full bg-neon-pink/20 text-neon-pink hover:bg-neon-pink/30"
-                      data-testid={`redeem-${promo.id}`}
+                      onClick={() => redeemRewardMutation.mutate(reward.id)}
+                      disabled={redeemRewardMutation.isPending || reward.stock <= 0 || (userBalance?.pointBalance || 0) < reward.pointsRequired}
+                      className="w-full bg-neon-pink/20 text-neon-pink hover:bg-neon-pink/30 disabled:opacity-50"
+                      data-testid={`redeem-reward-${reward.id}`}
                     >
-                      {redeemMutation.isPending ? (
+                      {redeemRewardMutation.isPending ? (
                         <LoadingSpinner size="sm" className="mr-2" />
-                      ) : null}
-                      Claim Promotion
+                      ) : reward.stock <= 0 ? (
+                        "Out of Stock"
+                      ) : (userBalance?.pointBalance || 0) < reward.pointsRequired ? (
+                        "Insufficient Points"
+                      ) : (
+                        "Redeem Reward"
+                      )}
                     </Button>
                   </CardContent>
                 </Card>
               ))}
             </div>
           ) : (
-            <div className="text-center py-12" data-testid="no-promotions">
-              <Gift className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
-              <h3 className="text-lg font-semibold mb-2">No Active Promotions</h3>
-              <p className="text-muted-foreground">Check back later for exciting offers!</p>
+            <div className="text-center py-12" data-testid="no-rewards">
+              <Award className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
+              <h3 className="text-lg font-semibold mb-2">No Rewards Available</h3>
+              <p className="text-muted-foreground">Check back later for exciting rewards!</p>
             </div>
           )}
         </TabsContent>
@@ -306,7 +306,7 @@ export default function UserDashboard() {
                           <td className="p-4">
                             <div className="flex items-center">
                               {transaction.type === 'purchase' && (
-                                <ShoppingCart className="w-4 h-4 text-neon-cyan mr-2" />
+                                <Coins className="w-4 h-4 text-neon-cyan mr-2" />
                               )}
                               {transaction.type === 'promotion' && (
                                 <Gift className="w-4 h-4 text-neon-pink mr-2" />
@@ -318,7 +318,7 @@ export default function UserDashboard() {
                             </div>
                           </td>
                           <td className="p-4">
-                            {transaction.amount ? `$${transaction.amount}` : `${transaction.coinsAdded} coins`}
+                            {transaction.amount ? `₱${transaction.amount}` : `${transaction.coinsAdded} coins`}
                           </td>
                           <td className="p-4 text-neon-cyan">+{transaction.pointsEarned}</td>
                           <td className="p-4">

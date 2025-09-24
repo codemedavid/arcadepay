@@ -1,93 +1,9 @@
-import { useStripe, Elements, PaymentElement, useElements } from '@stripe/react-stripe-js';
-import { loadStripe } from '@stripe/stripe-js';
-import { useEffect, useState } from 'react';
-import { apiRequest } from "@/lib/queryClient";
-import { useToast } from "@/hooks/use-toast";
+import { useState } from 'react';
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { useToast } from "@/hooks/use-toast";
 import { useLocation } from "wouter";
-import { ArrowLeft } from "lucide-react";
-
-// Make sure to call `loadStripe` outside of a component's render to avoid
-// recreating the `Stripe` object on every render.
-if (!import.meta.env.VITE_STRIPE_PUBLIC_KEY) {
-  throw new Error('Missing required Stripe key: VITE_STRIPE_PUBLIC_KEY');
-}
-const stripePromise = loadStripe(import.meta.env.VITE_STRIPE_PUBLIC_KEY);
-
-const CheckoutForm = ({ packageInfo }: { packageInfo: any }) => {
-  const stripe = useStripe();
-  const elements = useElements();
-  const { toast } = useToast();
-  const [, setLocation] = useLocation();
-  const [isProcessing, setIsProcessing] = useState(false);
-
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-
-    if (!stripe || !elements) {
-      return;
-    }
-
-    setIsProcessing(true);
-
-    const { error, paymentIntent } = await stripe.confirmPayment({
-      elements,
-      confirmParams: {
-        return_url: `${window.location.origin}/dashboard`,
-      },
-      redirect: 'if_required',
-    });
-
-    if (error) {
-      toast({
-        title: "Payment Failed",
-        description: error.message,
-        variant: "destructive",
-      });
-      setIsProcessing(false);
-    } else if (paymentIntent?.status === 'succeeded') {
-      // Confirm payment on our backend
-      try {
-        await apiRequest("POST", "/api/payment/confirm", {
-          paymentIntentId: paymentIntent.id,
-        });
-
-        toast({
-          title: "Payment Successful",
-          description: `You've received ${packageInfo.coins} coins and ${packageInfo.points} points!`,
-        });
-
-        setLocation("/dashboard");
-      } catch (error) {
-        toast({
-          title: "Payment Processing Error",
-          description: "Payment succeeded but there was an error updating your account. Please contact support.",
-          variant: "destructive",
-        });
-      }
-      setIsProcessing(false);
-    }
-  };
-
-  return (
-    <form onSubmit={handleSubmit} className="space-y-6">
-      <PaymentElement />
-      <Button
-        type="submit"
-        disabled={!stripe || isProcessing}
-        className="w-full py-3 neon-border-cyan bg-neon-cyan/10 text-neon-cyan hover:bg-neon-cyan/20"
-        data-testid="submit-payment"
-      >
-        {isProcessing ? (
-          <LoadingSpinner size="sm" className="mr-2" />
-        ) : null}
-        Pay ${packageInfo?.price?.toFixed(2)}
-      </Button>
-    </form>
-  );
-};
+import { ArrowLeft, Coins, Star } from "lucide-react";
 
 const coinPackages = {
   starter: { name: "Starter Pack", coins: 500, points: 50, price: 5.00 },
@@ -98,36 +14,25 @@ const coinPackages = {
 
 export default function Checkout() {
   const [, setLocation] = useLocation();
-  const [clientSecret, setClientSecret] = useState("");
-  const [packageType, setPackageType] = useState("");
+  const { toast } = useToast();
+  const [packageType, setPackageType] = useState("gamer");
 
-  useEffect(() => {
-    // Get package type from URL params
+  // Get package type from URL params
+  useState(() => {
     const urlParams = new URLSearchParams(window.location.search);
     const pkg = urlParams.get('package') || 'gamer';
     setPackageType(pkg);
-
-    // Create PaymentIntent as soon as the page loads
-    apiRequest("POST", "/api/create-payment-intent", { packageType: pkg })
-      .then((res) => res.json())
-      .then((data) => {
-        setClientSecret(data.clientSecret);
-      })
-      .catch((error) => {
-        console.error("Error creating payment intent:", error);
-        setLocation("/dashboard");
-      });
-  }, [setLocation]);
+  });
 
   const packageInfo = coinPackages[packageType as keyof typeof coinPackages];
 
-  if (!clientSecret) {
-    return (
-      <div className="min-h-screen flex items-center justify-center" data-testid="checkout-loading">
-        <LoadingSpinner size="lg" />
-      </div>
-    );
-  }
+  const handlePurchase = () => {
+    toast({
+      title: "Payment System Disabled",
+      description: "Payment processing has been temporarily disabled. Please contact an administrator for coin purchases.",
+      variant: "destructive",
+    });
+  };
 
   return (
     <div className="min-h-screen bg-background py-8" data-testid="checkout-page">
@@ -154,7 +59,7 @@ export default function Checkout() {
               <div className="space-y-4">
                 <div className="flex items-center justify-between">
                   <span className="font-semibold">{packageInfo?.name}</span>
-                  <span className="text-xl font-bold">${packageInfo?.price?.toFixed(2)}</span>
+                  <span className="text-xl font-bold">₱{packageInfo?.price?.toFixed(2)}</span>
                 </div>
                 <div className="text-sm text-muted-foreground">
                   • {packageInfo?.coins?.toLocaleString()} Arcade Coins
@@ -166,15 +71,32 @@ export default function Checkout() {
             </CardContent>
           </Card>
 
-          {/* Payment Form */}
-          <Card className="card-glow">
+          {/* Payment Notice */}
+          <Card className="card-glow border-yellow-400/50">
             <CardHeader>
-              <CardTitle>Payment Information</CardTitle>
+              <CardTitle className="text-yellow-400">Payment System Notice</CardTitle>
             </CardHeader>
             <CardContent>
-              <Elements stripe={stripePromise} options={{ clientSecret }}>
-                <CheckoutForm packageInfo={packageInfo} />
-              </Elements>
+              <div className="space-y-4">
+                <p className="text-muted-foreground">
+                  Payment processing has been temporarily disabled. To purchase coins, please contact an administrator.
+                </p>
+                <div className="flex items-center space-x-2 text-sm text-muted-foreground">
+                  <Coins className="w-4 h-4 text-yellow-400" />
+                  <span>Coins: {packageInfo?.coins?.toLocaleString()}</span>
+                </div>
+                <div className="flex items-center space-x-2 text-sm text-neon-cyan">
+                  <Star className="w-4 h-4" />
+                  <span>Bonus Points: +{packageInfo?.points}</span>
+                </div>
+                <Button
+                  onClick={handlePurchase}
+                  className="w-full py-3 bg-yellow-400/20 text-yellow-400 hover:bg-yellow-400/30"
+                  data-testid="contact-admin-button"
+                >
+                  Contact Administrator
+                </Button>
+              </div>
             </CardContent>
           </Card>
         </div>

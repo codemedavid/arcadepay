@@ -5,6 +5,7 @@ import {
   BarChart3, 
   Users, 
   Gift, 
+  Award,
   TrendingUp, 
   Plus,
   LogOut 
@@ -14,6 +15,8 @@ const sidebarItems = [
   { id: "overview", label: "Overview", icon: BarChart3, href: "/admin" },
   { id: "users", label: "Users", icon: Users, href: "/admin/users" },
   { id: "promotions", label: "Promotions", icon: Gift, href: "/admin/promotions" },
+  { id: "rewards", label: "Rewards", icon: Award, href: "/admin/rewards" },
+  { id: "claim-rewards", label: "Claim Rewards", icon: Gift, href: "/admin/claim-rewards" },
   { id: "sales", label: "Sales Reports", icon: TrendingUp, href: "/admin/sales" },
   { id: "topup", label: "Top-Up", icon: Plus, href: "/admin/topup" },
 ];

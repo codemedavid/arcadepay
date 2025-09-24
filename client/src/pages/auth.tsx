@@ -14,7 +14,7 @@ import { LoadingSpinner } from "@/components/ui/loading-spinner";
 
 const authSchema = z.object({
   email: z.string().email("Invalid email address"),
-  username: z.string().min(3, "Username must be at least 3 characters").optional(),
+  username: z.string().optional(),
   password: z.string().min(6, "Password must be at least 6 characters"),
 });
 
@@ -47,8 +47,9 @@ export default function Auth() {
         description: isSignUp ? "Account created successfully" : "Logged in successfully",
       });
       
-      // Invalidate auth query to refetch user data
-      queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      // Invalidate and refetch auth query to update user data
+      await queryClient.invalidateQueries({ queryKey: ["/api/auth/me"] });
+      await queryClient.refetchQueries({ queryKey: ["/api/auth/me"] });
       
       // Redirect based on user role
       if (data.user.role === "admin") {
@@ -58,22 +59,40 @@ export default function Auth() {
       }
     },
     onError: async (error: any) => {
-      const errorData = await error.response?.json?.() || { message: "Authentication failed" };
+      let errorMessage = "Authentication failed";
+      
+      try {
+        if (error.response) {
+          const errorData = await error.response.json();
+          errorMessage = errorData.message || errorMessage;
+        } else if (error.message) {
+          errorMessage = error.message;
+        }
+      } catch (parseError) {
+        // If we can't parse the error response, use the original error message
+        errorMessage = error.message || errorMessage;
+      }
+      
       toast({
-        title: "Error",
-        description: errorData.message,
+        title: "Authentication Error",
+        description: errorMessage,
         variant: "destructive",
       });
     },
   });
 
   const onSubmit = (data: AuthForm) => {
-    if (isSignUp && !data.username) {
-      form.setError("username", { message: "Username is required for sign up" });
-      return;
+    // Validate username for sign-up
+    if (isSignUp) {
+      if (!data.username || data.username.trim().length < 3) {
+        form.setError("username", { message: "Username must be at least 3 characters" });
+        return;
+      }
     }
+    
     authMutation.mutate(data);
   };
+
 
   return (
     <div className="min-h-screen flex items-center justify-center p-4" data-testid="auth-page">

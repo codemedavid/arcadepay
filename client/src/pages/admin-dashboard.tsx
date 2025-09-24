@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useLocation } from "wouter";
 import { AdminSidebar } from "@/components/layout/admin-sidebar";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
@@ -9,18 +9,19 @@ import { Textarea } from "@/components/ui/textarea";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Badge } from "@/components/ui/badge";
 import { useQuery, useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiRequest } from "@/lib/queryClient";
+import { apiRequest, getQueryFn } from "@/lib/queryClient";
 import { useToast } from "@/hooks/use-toast";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { 
   Users, 
-  DollarSign, 
+  Banknote, 
   Gift, 
   Clock, 
   TrendingUp,
   TrendingDown,
   ShoppingCart,
   Star,
+  Award,
   UserCog,
   Eye,
   RotateCcw,
@@ -74,16 +75,57 @@ interface Promotion {
   emoji: string;
 }
 
+interface Reward {
+  id: string;
+  title: string;
+  description: string;
+  imageUrl?: string;
+  pointsRequired: number;
+  stock: number;
+  isActive: boolean;
+  category: string;
+  emoji?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 export default function AdminDashboard() {
-  const [location] = useLocation();
+  const [location, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+
+  // Safely format currency values that may be strings from the backend
+  const formatMoney = (value: unknown) => {
+    const num = typeof value === "number" ? value : parseFloat(String(value ?? 0));
+    if (Number.isNaN(num)) return "0.00";
+    return num.toFixed(2);
+  };
+
+  // Auth check (admin guard)
+  const { data: authData, isLoading: authLoading } = useQuery<{ user: User } | null>({
+    queryKey: ["/api/auth/me"],
+    queryFn: getQueryFn({ on401: "returnNull" }),
+  });
+
+  useEffect(() => {
+    if (authLoading) return;
+    const user = authData?.user;
+    if (!user) {
+      setLocation("/auth");
+      return;
+    }
+    if (user.role !== "admin") {
+      setLocation("/dashboard");
+    }
+  }, [authLoading, authData, setLocation]);
 
   // Determine current section from URL
   const getCurrentSection = () => {
     if (location === "/admin") return "overview";
     if (location.includes("/users")) return "users";
     if (location.includes("/promotions")) return "promotions";
+    if (location.includes("/rewards") && !location.includes("/claim-rewards")) return "rewards";
+    if (location.includes("/claim-rewards")) return "claim-rewards";
     if (location.includes("/sales")) return "sales";
     if (location.includes("/topup")) return "topup";
     return "overview";
@@ -98,11 +140,48 @@ export default function AdminDashboard() {
 
   const { data: users = [], isLoading: usersLoading } = useQuery<User[]>({
     queryKey: ["/api/admin/users"],
-    enabled: currentSection === "users",
+    enabled: currentSection === "users" || currentSection === "topup",
   });
 
+  // Sales filters state
+  const [timeframe, setTimeframe] = useState<string>("7days");
+  const [salesFilters, setSalesFilters] = useState<{ startDate?: string; endDate?: string; type?: string; status?: string; userId?: string }>({});
+
+  const salesQueryUrl = useMemo(() => {
+    const params = new URLSearchParams();
+    const now = new Date();
+    let start: Date | undefined;
+    let end: Date | undefined = now;
+
+    if (timeframe === "today") {
+      start = new Date(now);
+      start.setHours(0, 0, 0, 0);
+    } else if (timeframe === "7days") {
+      start = new Date(now);
+      start.setDate(start.getDate() - 7);
+    } else if (timeframe === "30days") {
+      start = new Date(now);
+      start.setDate(start.getDate() - 30);
+    } else if (timeframe === "custom") {
+      if (salesFilters.startDate) params.set("startDate", salesFilters.startDate);
+      if (salesFilters.endDate) params.set("endDate", salesFilters.endDate);
+    }
+
+    if (timeframe !== "custom") {
+      if (start) params.set("startDate", start.toISOString());
+      if (end) params.set("endDate", end.toISOString());
+    }
+
+    if (salesFilters.type) params.set("type", salesFilters.type);
+    if (salesFilters.status) params.set("status", salesFilters.status);
+    if (salesFilters.userId) params.set("userId", salesFilters.userId);
+
+    const qs = params.toString();
+    return `/api/admin/transactions${qs ? `?${qs}` : ""}`;
+  }, [timeframe, salesFilters.startDate, salesFilters.endDate, salesFilters.type, salesFilters.status, salesFilters.userId]);
+
   const { data: transactions = [], isLoading: transactionsLoading } = useQuery<Transaction[]>({
-    queryKey: ["/api/admin/transactions"],
+    queryKey: [salesQueryUrl],
     enabled: currentSection === "sales",
   });
 
@@ -111,12 +190,25 @@ export default function AdminDashboard() {
     enabled: currentSection === "promotions",
   });
 
+  const { data: rewards = [], isLoading: rewardsLoading } = useQuery<Reward[]>({
+    queryKey: ["/api/admin/rewards"],
+    enabled: currentSection === "rewards" || currentSection === "claim-rewards",
+  });
+
   // Top-up form state
   const [topupForm, setTopupForm] = useState({
     userId: "",
     coins: "",
-    points: "",
+    amount: "",
     reason: "",
+  });
+
+  const computedPoints = Math.floor((parseFloat(topupForm.amount || "0") || 0) / 50);
+
+  // Claim reward form state
+  const [claimRewardForm, setClaimRewardForm] = useState({
+    userId: "",
+    rewardId: "",
   });
 
   // Promotion form state
@@ -141,7 +233,7 @@ export default function AdminDashboard() {
         title: "Top-up Successful",
         description: data.message,
       });
-      setTopupForm({ userId: "", coins: "", points: "", reason: "" });
+      setTopupForm({ userId: "", coins: "", amount: "", reason: "" });
       queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
     },
     onError: async (error: any) => {
@@ -184,17 +276,47 @@ export default function AdminDashboard() {
     },
   });
 
+  const claimRewardMutation = useMutation({
+    mutationFn: async (data: { userId: string; rewardId: string }) => {
+      return await apiRequest("POST", "/api/admin/rewards/claim", data);
+    },
+    onSuccess: async (response) => {
+      const data = await response.json();
+      toast({
+        title: "Reward Claimed Successfully",
+        description: `Reward "${data.redemption.reward.title}" has been claimed for user ${data.redemption.user.username}`,
+      });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/users"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/rewards"] });
+      queryClient.invalidateQueries({ queryKey: ["/api/admin/rewards/redemptions"] });
+      setClaimRewardForm({ userId: "", rewardId: "" });
+    },
+    onError: async (error: any) => {
+      const errorData = await error.response?.json?.() || { message: "Failed to claim reward" };
+      toast({
+        title: "Error",
+        description: errorData.message,
+        variant: "destructive",
+      });
+    },
+  });
+
   const handleTopupSubmit = (e: React.FormEvent) => {
     e.preventDefault();
-    if (!topupForm.userId || (!topupForm.coins && !topupForm.points)) {
+    if (!topupForm.userId || (!topupForm.coins && !topupForm.amount)) {
       toast({
         title: "Validation Error",
-        description: "Please select a user and specify coins or points to add",
+        description: "Please select a user and specify amount and/or coins",
         variant: "destructive",
       });
       return;
     }
-    topupMutation.mutate(topupForm);
+    topupMutation.mutate({
+      userId: topupForm.userId,
+      coins: topupForm.coins,
+      amount: topupForm.amount,
+      reason: topupForm.reason,
+    });
   };
 
   const handlePromotionSubmit = (e: React.FormEvent) => {
@@ -209,6 +331,14 @@ export default function AdminDashboard() {
     
     createPromotionMutation.mutate(data);
   };
+
+  if (authLoading) {
+    return (
+      <div className="min-h-screen flex items-center justify-center">
+        <LoadingSpinner />
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen flex" data-testid="admin-dashboard">
@@ -256,11 +386,11 @@ export default function AdminDashboard() {
                       <div>
                         <p className="text-muted-foreground text-sm">Total Revenue</p>
                         <p className="text-2xl font-bold glow-cyan">
-                          ${analytics?.totalRevenue?.toFixed(2) || "0.00"}
+                          ₱{formatMoney(analytics?.totalRevenue)}
                         </p>
                       </div>
                       <div className="w-12 h-12 bg-neon-pink/20 rounded-lg flex items-center justify-center">
-                        <DollarSign className="text-neon-pink text-xl" />
+                        <Banknote className="text-neon-pink text-xl" />
                       </div>
                     </div>
                     <div className="flex items-center mt-2">
@@ -294,7 +424,7 @@ export default function AdminDashboard() {
                       <div>
                         <p className="text-muted-foreground text-sm">Avg Transaction</p>
                         <p className="text-2xl font-bold glow-cyan">
-                          ${analytics?.averageTransaction?.toFixed(2) || "0.00"}
+                          ₱{formatMoney(analytics?.averageTransaction)}
                         </p>
                       </div>
                       <div className="w-12 h-12 bg-neon-purple/20 rounded-lg flex items-center justify-center">
@@ -559,28 +689,332 @@ export default function AdminDashboard() {
           </div>
         )}
 
+        {/* Rewards Section */}
+        {currentSection === "rewards" && (
+          <div className="p-6" data-testid="admin-rewards">
+            <div className="flex items-center justify-between mb-6">
+              <h2 className="font-arcade text-3xl font-bold glow-green">Reward Management</h2>
+              <Button
+                onClick={() => {/* TODO: Add reward creation modal */}}
+                className="neon-border-cyan bg-neon-cyan/10 text-neon-cyan hover:bg-neon-cyan/20"
+                data-testid="create-reward-button"
+              >
+                <Plus className="mr-2 h-4 w-4" />
+                Create Reward
+              </Button>
+            </div>
+
+            {rewardsLoading ? (
+              <div className="flex justify-center py-12">
+                <LoadingSpinner size="lg" />
+              </div>
+            ) : rewards.length > 0 ? (
+              <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {rewards.map((reward) => (
+                  <Card key={reward.id} className="card-glow" data-testid={`reward-${reward.id}`}>
+                    <CardContent className="p-6">
+                      <div className="flex items-start justify-between mb-4">
+                        <div className="flex-1">
+                          <h3 className="font-bold text-lg mb-2">{reward.title}</h3>
+                          <p className="text-sm text-muted-foreground mb-3">{reward.description}</p>
+                          <div className="flex items-center justify-between">
+                            <div className="flex items-center space-x-2">
+                              <Star className="w-4 h-4 text-neon-cyan" />
+                              <span className="text-sm font-semibold text-neon-cyan">
+                                {reward.pointsRequired} points
+                              </span>
+                            </div>
+                            <Badge 
+                              variant={reward.stock > 0 ? "default" : "secondary"}
+                              className={reward.stock > 0 
+                                ? "bg-neon-green/20 text-neon-green" 
+                                : "bg-red-400/20 text-red-400"
+                              }
+                            >
+                              {reward.stock} in stock
+                            </Badge>
+                          </div>
+                        </div>
+                        <span className="text-2xl ml-2">{reward.emoji}</span>
+                      </div>
+                      
+                      <div className="flex items-center justify-between">
+                        <Badge 
+                          variant={reward.isActive ? "default" : "secondary"}
+                          className={reward.isActive 
+                            ? "bg-neon-green/20 text-neon-green" 
+                            : "bg-gray-400/20 text-gray-400"
+                          }
+                        >
+                          {reward.isActive ? "Active" : "Inactive"}
+                        </Badge>
+                        <div className="flex items-center space-x-2">
+                          <Button variant="ghost" size="sm" title="Edit" data-testid={`edit-reward-${reward.id}`}>
+                            <Edit className="w-4 h-4" />
+                          </Button>
+                          <Button variant="ghost" size="sm" title="Delete" data-testid={`delete-reward-${reward.id}`}>
+                            <Trash2 className="w-4 h-4 text-red-400" />
+                          </Button>
+                        </div>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ))}
+              </div>
+            ) : (
+              <div className="text-center py-12" data-testid="no-rewards">
+                <Award className="w-16 h-16 mx-auto mb-4 text-muted-foreground" />
+                <h3 className="text-lg font-semibold mb-2">No Rewards Created</h3>
+                <p className="text-muted-foreground mb-4">
+                  Create your first reward to encourage users to earn more points!
+                </p>
+                <Button
+                  onClick={() => {/* TODO: Add reward creation modal */}}
+                  className="neon-border-cyan bg-neon-cyan/10 text-neon-cyan hover:bg-neon-cyan/20"
+                >
+                  <Plus className="mr-2 h-4 w-4" />
+                  Create Your First Reward
+                </Button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* Claim Rewards Section */}
+        {currentSection === "claim-rewards" && (
+          <div className="p-6" data-testid="admin-claim-rewards">
+            <div className="mb-6">
+              <h2 className="font-arcade text-3xl font-bold glow-green">Claim Rewards for Users</h2>
+              <p className="text-muted-foreground mt-2">Process reward redemptions for customers at the cashier</p>
+            </div>
+
+            <Card className="card-glow mb-6">
+              <CardContent className="p-6">
+                <h3 className="font-bold text-lg mb-4">Claim Reward</h3>
+                <form onSubmit={(e) => {
+                  e.preventDefault();
+                  if (!claimRewardForm.userId || !claimRewardForm.rewardId) {
+                    toast({
+                      title: "Validation Error",
+                      description: "Please select both user and reward",
+                      variant: "destructive",
+                    });
+                    return;
+                  }
+                  claimRewardMutation.mutate(claimRewardForm);
+                }}>
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-4">
+                    <div>
+                      <Label htmlFor="claim-user">Select User</Label>
+                      <Select
+                        value={claimRewardForm.userId}
+                        onValueChange={(value) => setClaimRewardForm({ ...claimRewardForm, userId: value })}
+                      >
+                        <SelectTrigger data-testid="select-claim-user">
+                          <SelectValue placeholder="Choose a user..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {users.map((user) => (
+                            <SelectItem key={user.id} value={user.id}>
+                              {user.username} ({user.email}) - {user.pointBalance} points
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+
+                    <div>
+                      <Label htmlFor="claim-reward">Select Reward</Label>
+                      <Select
+                        value={claimRewardForm.rewardId}
+                        onValueChange={(value) => setClaimRewardForm({ ...claimRewardForm, rewardId: value })}
+                      >
+                        <SelectTrigger data-testid="select-claim-reward">
+                          <SelectValue placeholder="Choose a reward..." />
+                        </SelectTrigger>
+                        <SelectContent>
+                          {rewards.filter(r => r.isActive && r.stock > 0).map((reward) => (
+                            <SelectItem key={reward.id} value={reward.id}>
+                              {reward.title} - {reward.pointsRequired} points ({reward.stock} left)
+                            </SelectItem>
+                          ))}
+                        </SelectContent>
+                      </Select>
+                    </div>
+                  </div>
+
+                  <Button
+                    type="submit"
+                    disabled={claimRewardMutation.isPending}
+                    className="w-full bg-neon-pink/20 text-neon-pink hover:bg-neon-pink/30"
+                    data-testid="claim-reward-button"
+                  >
+                    {claimRewardMutation.isPending ? (
+                      <>
+                        <LoadingSpinner size="sm" className="mr-2" />
+                        Claiming Reward...
+                      </>
+                    ) : (
+                      "Claim Reward for User"
+                    )}
+                  </Button>
+                </form>
+              </CardContent>
+            </Card>
+
+            {/* Available Rewards Preview */}
+            <div className="mb-6">
+              <h3 className="font-bold text-lg mb-4">Available Rewards</h3>
+              {rewardsLoading ? (
+                <div className="flex justify-center py-8">
+                  <LoadingSpinner size="lg" />
+                </div>
+              ) : rewards.length > 0 ? (
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {rewards.filter(r => r.isActive && r.stock > 0).map((reward) => (
+                    <Card key={reward.id} className="card-glow">
+                      <CardContent className="p-4">
+                        <div className="flex items-start justify-between mb-3">
+                          <div className="flex-1">
+                            <h4 className="font-bold">{reward.title}</h4>
+                            <p className="text-sm text-muted-foreground">{reward.description}</p>
+                          </div>
+                          <span className="text-xl ml-2">{reward.emoji}</span>
+                        </div>
+                        <div className="flex items-center justify-between">
+                          <div className="flex items-center space-x-2">
+                            <Star className="w-4 h-4 text-neon-cyan" />
+                            <span className="text-sm font-semibold text-neon-cyan">
+                              {reward.pointsRequired} points
+                            </span>
+                          </div>
+                          <Badge className="bg-neon-green/20 text-neon-green">
+                            {reward.stock} left
+                          </Badge>
+                        </div>
+                      </CardContent>
+                    </Card>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-center py-8">
+                  <Award className="w-12 h-12 mx-auto mb-2 text-muted-foreground" />
+                  <p className="text-muted-foreground">No active rewards available</p>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
         {/* Sales Section */}
         {currentSection === "sales" && (
           <div className="p-6" data-testid="admin-sales">
             <div className="flex items-center justify-between mb-6">
               <h2 className="font-arcade text-3xl font-bold glow-green">Sales Reports</h2>
               <div className="flex space-x-4">
-                <Select defaultValue="7days">
+                <Select value={timeframe} onValueChange={setTimeframe}>
                   <SelectTrigger className="w-40" data-testid="select-timeframe">
                     <SelectValue />
                   </SelectTrigger>
                   <SelectContent>
+                    <SelectItem value="today">Today</SelectItem>
                     <SelectItem value="7days">Last 7 days</SelectItem>
                     <SelectItem value="30days">Last 30 days</SelectItem>
-                    <SelectItem value="3months">Last 3 months</SelectItem>
+                    <SelectItem value="custom">Custom range</SelectItem>
                   </SelectContent>
                 </Select>
-                <Button variant="outline" data-testid="export-button">
+                <Button
+                  variant="outline"
+                  data-testid="export-button"
+                  onClick={() => {
+                    const rows = transactions as any[];
+                    const headers = ["id","userId","type","amount","coinsAdded","pointsEarned","description","status","createdAt"];
+                    const escape = (v: any) => {
+                      if (v === null || v === undefined) return "";
+                      const s = String(v).replace(/"/g, '""');
+                      return `"${s}"`;
+                    };
+                    const csv = [
+                      headers.join(","),
+                      ...rows.map(r => headers.map(h => escape((r as any)[h])).join(","))
+                    ].join("\n");
+                    const blob = new Blob([csv], { type: "text/csv;charset=utf-8;" });
+                    const url = URL.createObjectURL(blob);
+                    const a = document.createElement("a");
+                    a.href = url;
+                    a.download = `transactions-${new Date().toISOString()}.csv`;
+                    a.click();
+                    URL.revokeObjectURL(url);
+                  }}
+                >
                   <Download className="w-4 h-4 mr-2" />
                   Export
                 </Button>
               </div>
             </div>
+
+            {timeframe === "custom" && (
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4 mb-6">
+                <div>
+                  <Label>Start date</Label>
+                  <Input
+                    type="datetime-local"
+                    value={salesFilters.startDate || ""}
+                    onChange={(e) => setSalesFilters({ ...salesFilters, startDate: e.target.value || undefined })}
+                  />
+                </div>
+                <div>
+                  <Label>End date</Label>
+                  <Input
+                    type="datetime-local"
+                    value={salesFilters.endDate || ""}
+                    onChange={(e) => setSalesFilters({ ...salesFilters, endDate: e.target.value || undefined })}
+                  />
+                </div>
+                <div>
+                  <Label>Type</Label>
+                  <Select
+                    value={salesFilters.type || ""}
+                    onValueChange={(v) => setSalesFilters({ ...salesFilters, type: v || undefined })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Any" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Any</SelectItem>
+                      <SelectItem value="purchase">Purchase</SelectItem>
+                      <SelectItem value="promotion">Promotion</SelectItem>
+                      <SelectItem value="reward_redemption">Reward Redemption</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div>
+                  <Label>Status</Label>
+                  <Select
+                    value={salesFilters.status || ""}
+                    onValueChange={(v) => setSalesFilters({ ...salesFilters, status: v || undefined })}
+                  >
+                    <SelectTrigger>
+                      <SelectValue placeholder="Any" />
+                    </SelectTrigger>
+                    <SelectContent>
+                      <SelectItem value="">Any</SelectItem>
+                      <SelectItem value="completed">Completed</SelectItem>
+                      <SelectItem value="pending">Pending</SelectItem>
+                      <SelectItem value="failed">Failed</SelectItem>
+                    </SelectContent>
+                  </Select>
+                </div>
+                <div className="md:col-span-2">
+                  <Label>User ID</Label>
+                  <Input
+                    placeholder="Filter by user ID"
+                    value={salesFilters.userId || ""}
+                    onChange={(e) => setSalesFilters({ ...salesFilters, userId: e.target.value || undefined })}
+                  />
+                </div>
+              </div>
+            )}
 
             {/* Sales Summary */}
             <div className="grid grid-cols-1 md:grid-cols-3 gap-6 mb-8">
@@ -588,7 +1022,7 @@ export default function AdminDashboard() {
                 <CardContent className="p-6">
                   <h3 className="text-lg font-semibold mb-2">Total Sales</h3>
                   <p className="text-3xl font-bold glow-cyan" data-testid="total-sales">
-                    ${analytics?.totalRevenue?.toFixed(2) || "0.00"}
+                    ₱{formatMoney(analytics?.totalRevenue)}
                   </p>
                   <p className="text-sm text-muted-foreground">All time</p>
                 </CardContent>
@@ -606,7 +1040,7 @@ export default function AdminDashboard() {
                 <CardContent className="p-6">
                   <h3 className="text-lg font-semibold mb-2">Avg. Transaction</h3>
                   <p className="text-3xl font-bold glow-cyan" data-testid="avg-transaction-sales">
-                    ${analytics?.averageTransaction?.toFixed(2) || "0.00"}
+                    ₱{formatMoney(analytics?.averageTransaction)}
                   </p>
                   <p className="text-sm text-muted-foreground">Per transaction</p>
                 </CardContent>
@@ -642,7 +1076,7 @@ export default function AdminDashboard() {
                             <td className="p-4">{transaction.userId}</td>
                             <td className="p-4">{transaction.description}</td>
                             <td className="p-4 font-semibold">
-                              {transaction.amount ? `$${transaction.amount}` : `${transaction.coinsAdded} coins`}
+                              {transaction.amount ? `₱${transaction.amount}` : `${transaction.coinsAdded} coins`}
                             </td>
                             <td className="p-4 text-neon-cyan">+{transaction.pointsEarned}</td>
                             <td className="p-4">
@@ -678,7 +1112,7 @@ export default function AdminDashboard() {
               {/* Top-Up Form */}
               <Card className="card-glow">
                 <CardHeader>
-                  <CardTitle>Add Coins/Points to User Account</CardTitle>
+                  <CardTitle>Record Cashier Purchase / Top-Up</CardTitle>
                 </CardHeader>
                 <CardContent>
                   <form onSubmit={handleTopupSubmit} className="space-y-4" data-testid="topup-form">
@@ -703,6 +1137,18 @@ export default function AdminDashboard() {
 
                     <div className="grid grid-cols-2 gap-4">
                       <div>
+                        <Label htmlFor="topup-amount">Amount Paid (₱)</Label>
+                        <Input
+                          id="topup-amount"
+                          type="number"
+                          step="0.01"
+                          value={topupForm.amount}
+                          onChange={(e) => setTopupForm({ ...topupForm, amount: e.target.value })}
+                          placeholder="0.00"
+                          data-testid="input-topup-amount"
+                        />
+                      </div>
+                      <div>
                         <Label htmlFor="topup-coins">Coins to Add</Label>
                         <Input
                           id="topup-coins"
@@ -713,17 +1159,10 @@ export default function AdminDashboard() {
                           data-testid="input-topup-coins"
                         />
                       </div>
-                      <div>
-                        <Label htmlFor="topup-points">Bonus Points</Label>
-                        <Input
-                          id="topup-points"
-                          type="number"
-                          value={topupForm.points}
-                          onChange={(e) => setTopupForm({ ...topupForm, points: e.target.value })}
-                          placeholder="0"
-                          data-testid="input-topup-points"
-                        />
-                      </div>
+                    </div>
+
+                    <div className="text-sm text-muted-foreground">
+                      Points to award: <span className="font-semibold text-neon-cyan">{isNaN(computedPoints) ? 0 : computedPoints}</span> (₱50 = 1 point)
                     </div>
 
                     <div>

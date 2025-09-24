@@ -1,14 +1,13 @@
-import { drizzle } from "drizzle-orm/neon-http";
-import { neon, neonConfig } from "@neondatabase/serverless";
+import { drizzle } from "drizzle-orm/node-postgres";
+import { Pool } from "pg";
 import { eq, desc, and, gte, lte, count, sql } from "drizzle-orm";
-
-// Configure for Supabase compatibility
-neonConfig.pipelineConnect = false;
 import { 
   users, 
   transactions, 
   promotions, 
   promotionRedemptions,
+  rewards,
+  rewardRedemptions,
   adminActions,
   type User, 
   type InsertUser,
@@ -17,6 +16,10 @@ import {
   type Promotion,
   type InsertPromotion,
   type InsertPromotionRedemption,
+  type Reward,
+  type InsertReward,
+  type RewardRedemption,
+  type InsertRewardRedemption,
   type InsertAdminAction,
   type AdminAction
 } from "@shared/schema";
@@ -25,8 +28,8 @@ if (!process.env.DATABASE_URL) {
   throw new Error("DATABASE_URL is required");
 }
 
-const connectionSql = neon(process.env.DATABASE_URL);
-const db = drizzle(connectionSql);
+const pool = new Pool({ connectionString: process.env.DATABASE_URL, ssl: { rejectUnauthorized: false } });
+const db = drizzle(pool);
 
 export interface IStorage {
   // User operations
@@ -41,6 +44,13 @@ export interface IStorage {
   createTransaction(transaction: InsertTransaction): Promise<Transaction>;
   getUserTransactions(userId: string): Promise<Transaction[]>;
   getAllTransactions(): Promise<Transaction[]>;
+  getTransactionsFiltered(filters: {
+    startDate?: Date;
+    endDate?: Date;
+    type?: string;
+    status?: string;
+    userId?: string;
+  }): Promise<Transaction[]>;
   
   // Promotion operations
   createPromotion(promotion: InsertPromotion): Promise<Promotion>;
@@ -50,6 +60,18 @@ export interface IStorage {
   deletePromotion(id: string): Promise<void>;
   redeemPromotion(redemption: InsertPromotionRedemption): Promise<void>;
   getUserPromotionRedemptions(userId: string): Promise<{ promotion: Promotion; redeemedAt: Date }[]>;
+  
+  // Reward operations
+  createReward(reward: InsertReward): Promise<Reward>;
+  getActiveRewards(): Promise<Reward[]>;
+  getAllRewards(): Promise<Reward[]>;
+  getRewardById(id: string): Promise<Reward | undefined>;
+  updateReward(id: string, updates: Partial<Reward>): Promise<Reward>;
+  deleteReward(id: string): Promise<void>;
+  redeemReward(redemption: InsertRewardRedemption): Promise<RewardRedemption>;
+  getUserRewardRedemptions(userId: string): Promise<Array<RewardRedemption & { reward: Reward }>>;
+  getAllRewardRedemptions(): Promise<Array<RewardRedemption & { reward: Reward; user: User }>>;
+  updateRewardRedemptionStatus(id: string, status: string, notes?: string): Promise<void>;
   
   // Admin operations
   logAdminAction(action: InsertAdminAction): Promise<void>;
@@ -129,6 +151,39 @@ export class DbStorage implements IStorage {
     return await db
       .select()
       .from(transactions)
+      .orderBy(desc(transactions.createdAt));
+  }
+
+  async getTransactionsFiltered(filters: {
+    startDate?: Date;
+    endDate?: Date;
+    type?: string;
+    status?: string;
+    userId?: string;
+  }): Promise<Transaction[]> {
+    const conditions: any[] = [];
+    if (filters.startDate) {
+      conditions.push(gte(transactions.createdAt, filters.startDate));
+    }
+    if (filters.endDate) {
+      conditions.push(lte(transactions.createdAt, filters.endDate));
+    }
+    if (filters.type) {
+      conditions.push(eq(transactions.type, filters.type));
+    }
+    if (filters.status) {
+      conditions.push(eq(transactions.status, filters.status));
+    }
+    if (filters.userId) {
+      conditions.push(eq(transactions.userId, filters.userId));
+    }
+
+    const whereClause = conditions.length > 0 ? and(...conditions) : undefined;
+
+    return await db
+      .select()
+      .from(transactions)
+      .where(whereClause as any)
       .orderBy(desc(transactions.createdAt));
   }
 
@@ -265,6 +320,209 @@ export class DbStorage implements IStorage {
       totalUsers: totalUsers[0].count,
       activeUsers: activeUsers[0].count,
     };
+  }
+
+  // Reward operations
+  async createReward(reward: InsertReward): Promise<Reward> {
+    const [newReward] = await db.insert(rewards).values({
+      ...reward,
+      updatedAt: new Date(),
+    }).returning();
+    return newReward;
+  }
+
+  async getActiveRewards(): Promise<Reward[]> {
+    return await db
+      .select()
+      .from(rewards)
+      .where(and(eq(rewards.isActive, true), gte(rewards.stock, 1)))
+      .orderBy(desc(rewards.pointsRequired));
+  }
+
+  async getAllRewards(): Promise<Reward[]> {
+    return await db
+      .select()
+      .from(rewards)
+      .orderBy(desc(rewards.createdAt));
+  }
+
+  async getRewardById(id: string): Promise<Reward | undefined> {
+    const [reward] = await db
+      .select()
+      .from(rewards)
+      .where(eq(rewards.id, id));
+    return reward;
+  }
+
+  async updateReward(id: string, updates: Partial<Reward>): Promise<Reward> {
+    const [updatedReward] = await db
+      .update(rewards)
+      .set({
+        ...updates,
+        updatedAt: new Date(),
+      })
+      .where(eq(rewards.id, id))
+      .returning();
+    return updatedReward;
+  }
+
+  async deleteReward(id: string): Promise<void> {
+    await db.delete(rewards).where(eq(rewards.id, id));
+  }
+
+  async redeemReward(redemption: InsertRewardRedemption): Promise<RewardRedemption> {
+    return await db.transaction(async (tx) => {
+      // Check if reward exists and has stock
+      const reward = await tx
+        .select()
+        .from(rewards)
+        .where(eq(rewards.id, redemption.rewardId))
+        .limit(1);
+      
+      if (!reward[0]) {
+        throw new Error('Reward not found');
+      }
+      
+      if (reward[0].stock <= 0) {
+        throw new Error('Reward out of stock');
+      }
+
+      // Check if user has enough points
+      const user = await tx
+        .select()
+        .from(users)
+        .where(eq(users.id, redemption.userId))
+        .limit(1);
+      
+      if (!user[0] || user[0].pointBalance < redemption.pointsSpent) {
+        throw new Error('Insufficient points');
+      }
+
+      // Create redemption record
+      const [newRedemption] = await tx
+        .insert(rewardRedemptions)
+        .values(redemption)
+        .returning();
+
+      // Update user points
+      await tx
+        .update(users)
+        .set({
+          pointBalance: user[0].pointBalance - redemption.pointsSpent,
+        })
+        .where(eq(users.id, redemption.userId));
+
+      // Update reward stock
+      await tx
+        .update(rewards)
+        .set({
+          stock: reward[0].stock - 1,
+        })
+        .where(eq(rewards.id, redemption.rewardId));
+
+      // Create transaction record
+      await tx.insert(transactions).values({
+        userId: redemption.userId,
+        type: 'reward_redemption',
+        coinsAdded: 0,
+        pointsEarned: -redemption.pointsSpent,
+        description: `Redeemed reward: ${reward[0].title}`,
+        status: 'completed',
+        metadata: { rewardId: redemption.rewardId, redemptionId: newRedemption.id },
+      });
+
+      return newRedemption;
+    });
+  }
+
+  async getUserRewardRedemptions(userId: string): Promise<Array<RewardRedemption & { reward: Reward }>> {
+    return await db
+      .select({
+        id: rewardRedemptions.id,
+        userId: rewardRedemptions.userId,
+        rewardId: rewardRedemptions.rewardId,
+        pointsSpent: rewardRedemptions.pointsSpent,
+        status: rewardRedemptions.status,
+        redemptionCode: rewardRedemptions.redemptionCode,
+        claimedAt: rewardRedemptions.claimedAt,
+        completedAt: rewardRedemptions.completedAt,
+        notes: rewardRedemptions.notes,
+        reward: {
+          id: rewards.id,
+          title: rewards.title,
+          description: rewards.description,
+          imageUrl: rewards.imageUrl,
+          pointsRequired: rewards.pointsRequired,
+          stock: rewards.stock,
+          isActive: rewards.isActive,
+          category: rewards.category,
+          emoji: rewards.emoji,
+          createdAt: rewards.createdAt,
+          updatedAt: rewards.updatedAt,
+        },
+      })
+      .from(rewardRedemptions)
+      .innerJoin(rewards, eq(rewardRedemptions.rewardId, rewards.id))
+      .where(eq(rewardRedemptions.userId, userId))
+      .orderBy(desc(rewardRedemptions.claimedAt));
+  }
+
+  async getAllRewardRedemptions(): Promise<Array<RewardRedemption & { reward: Reward; user: User }>> {
+    return await db
+      .select({
+        id: rewardRedemptions.id,
+        userId: rewardRedemptions.userId,
+        rewardId: rewardRedemptions.rewardId,
+        pointsSpent: rewardRedemptions.pointsSpent,
+        status: rewardRedemptions.status,
+        redemptionCode: rewardRedemptions.redemptionCode,
+        claimedAt: rewardRedemptions.claimedAt,
+        completedAt: rewardRedemptions.completedAt,
+        notes: rewardRedemptions.notes,
+        reward: {
+          id: rewards.id,
+          title: rewards.title,
+          description: rewards.description,
+          imageUrl: rewards.imageUrl,
+          pointsRequired: rewards.pointsRequired,
+          stock: rewards.stock,
+          isActive: rewards.isActive,
+          category: rewards.category,
+          emoji: rewards.emoji,
+          createdAt: rewards.createdAt,
+          updatedAt: rewards.updatedAt,
+        },
+        user: {
+          id: users.id,
+          email: users.email,
+          username: users.username,
+          password: users.password,
+          role: users.role,
+          coinBalance: users.coinBalance,
+          pointBalance: users.pointBalance,
+          level: users.level,
+          createdAt: users.createdAt,
+        },
+      })
+      .from(rewardRedemptions)
+      .innerJoin(rewards, eq(rewardRedemptions.rewardId, rewards.id))
+      .innerJoin(users, eq(rewardRedemptions.userId, users.id))
+      .orderBy(desc(rewardRedemptions.claimedAt));
+  }
+
+  async updateRewardRedemptionStatus(id: string, status: string, notes?: string): Promise<void> {
+    const updates: any = { status };
+    if (status === 'completed') {
+      updates.completedAt = new Date();
+    }
+    if (notes) {
+      updates.notes = notes;
+    }
+    
+    await db
+      .update(rewardRedemptions)
+      .set(updates)
+      .where(eq(rewardRedemptions.id, id));
   }
 }
 
